@@ -5,6 +5,7 @@ on:
     paths:
       - 'docker/Dockerfile.spheron-wan'
       - 'docker/entrypoint.sh'
+      - 'docker/download_models.py'
       - '.github/workflows/build-comfyui-wan.yml'
   workflow_dispatch:  # permite trigger manual pelo GitHub UI
 
@@ -61,3 +62,11 @@ jobs:
           cache-to: type=gha,mode=max
           # HF_TOKEN não vai no build arg — é injetado em runtime via entrypoint.sh
           # O entrypoint.sh lê HF_TOKEN da env var do container (Spheron .env)
+
+      - name: Make package public
+        run: |
+          gh api --method PATCH \
+            "/user/packages/container/${{ env.IMAGE_NAME }}/visibility" \
+            -f visibility=public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
