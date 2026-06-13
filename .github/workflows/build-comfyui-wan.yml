@@ -60,13 +60,11 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # HF_TOKEN não vai no build arg — é injetado em runtime via entrypoint.sh
-          # O entrypoint.sh lê HF_TOKEN da env var do container (Spheron .env)
+          # Models are baked into the image at build time (docker/download_models.py).
+          # Repos são públicos no HF — sem HF_TOKEN.
 
-      - name: Make package public
-        run: |
-          gh api --method PATCH \
-            "/user/packages/container/${{ env.IMAGE_NAME }}/visibility" \
-            -f visibility=public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # NOTE: package visibility (public) is set once in the GitHub UI and persists
+      # across pushes. We do NOT PATCH it per-build — the default GITHUB_TOKEN lacks
+      # permission for /user/packages visibility changes (that needs a classic PAT),
+      # and the step was failing the whole workflow even though the build succeeded.
+      # Confirmed public via anonymous GHCR pull on 2026-06-13.
