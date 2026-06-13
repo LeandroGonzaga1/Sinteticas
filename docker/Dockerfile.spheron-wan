@@ -37,7 +37,7 @@ RUN mkdir -p /app/ComfyUI/models/diffusion_models/I2V \
 # Script in a separate file to avoid Docker mis-parsing "from X import Y" as FROM.
 # Public HF repos (no HF_TOKEN needed). Total ~25GB, build time ~25-35 min.
 COPY docker/download_models.py /tmp/download_models.py
-RUN pip install --no-cache-dir huggingface_hub && python /tmp/download_models.py
+RUN python3 -m pip install --no-cache-dir huggingface_hub && python3 /tmp/download_models.py
 
 WORKDIR /app/ComfyUI
 
