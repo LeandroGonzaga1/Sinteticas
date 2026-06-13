@@ -28,10 +28,43 @@ RUN git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && \
 # Model directories
 RUN mkdir -p /app/ComfyUI/models/diffusion_models/I2V \
              /app/ComfyUI/models/text_encoders \
-             /app/ComfyUI/models/vae/wanvideo \
-             /app/ComfyUI/models/clip_vision \
+             /app/ComfyUI/models/vae \
+             /app/ComfyUI/models/clip \
              /app/ComfyUI/input \
              /app/ComfyUI/output
+
+# Bake Wan2.1 models at build time — eliminates 15GB runtime download.
+# Public HF repos (verified by QWEN+ plan 2026-06-13): no HF_TOKEN needed.
+# Total ~25GB across 4 files. Build time on first run: 25-35 min.
+RUN pip install --no-cache-dir huggingface_hub && \
+    python -c "
+from huggingface_hub import hf_hub_download
+
+# Wan2.1 I2V 14B fp8 (Kijai's prequantized wrapper format)
+hf_hub_download(
+    repo_id='Kijai/WanVideo_comfy',
+    filename='Wan2_1-I2V-14B-480p_fp8_e4m3fn.safetensors',
+    local_dir='/app/ComfyUI/models/diffusion_models/I2V'
+)
+# UMT5-XXL text encoder fp8 (e4m3fnuz variant for WanVideoWrapper)
+hf_hub_download(
+    repo_id='Kijai/WanVideo_comfy',
+    filename='umt5-xxl-enc-fp8_e4m3fnuz.safetensors',
+    local_dir='/app/ComfyUI/models/text_encoders'
+)
+# Wan2.1 VAE bf16
+hf_hub_download(
+    repo_id='Kijai/WanVideo_comfy',
+    filename='Wan2_1_VAE_bf16.safetensors',
+    local_dir='/app/ComfyUI/models/vae'
+)
+# CLIP ViT-Large/14 (Wan2.1 visual encoder)
+hf_hub_download(
+    repo_id='openai/clip-vit-large-patch14',
+    filename='model.safetensors',
+    local_dir='/app/ComfyUI/models/clip'
+)
+"
 
 WORKDIR /app/ComfyUI
 
