@@ -1,16 +1,24 @@
 """
-Bake Wan2.1 models at Docker build time.
+Bake Wan2.1 I2V models into the Docker image at build time.
 
-Robust: lists actual files in HuggingFace repo before downloading,
-then creates canonical symlinks so the ComfyUI workflow never needs
-to know the exact HuggingFace filename.
+Robustness model:
+  - EXACT filenames, verified to exist in the HF repos on 2026-06-13.
+    (An earlier sorted()[0] heuristic silently picked the WRONG files:
+    a Lightx2v LoRA instead of the base I2V model, a bf16 encoder instead
+    of fp8, and an MTVCrafter VAE. So: explicit names, no guessing.)
+  - FAIL LOUD: before downloading, list the repo and assert each exact file
+    exists. If a file was renamed upstream, the build fails immediately and
+    prints the available candidates instead of baking a wrong model.
+  - Canonical symlinks: the ComfyUI workflow references stable names
+    (wan_i2v_480p.safetensors, ...). Only this file changes if HF renames.
 
-Canonical names (used in i2v_workflow_a100.py):
+Canonical names (must match spheron/i2v_workflow_a100.py):
   diffusion_models/I2V/wan_i2v_480p.safetensors
   text_encoders/wan_t5_encoder.safetensors
   vae/wan_vae.safetensors
   clip_vision/wan_clip_h14.safetensors
 """
+import json
 import os
 import shutil
 
@@ -18,101 +26,79 @@ from huggingface_hub import HfApi, hf_hub_download
 
 api = HfApi()
 
-# ── 1. Discover Kijai/WanVideo_comfy ────────────────────────────────────────
-print("\n=== Listing Kijai/WanVideo_comfy ===")
-wan_files = list(api.list_repo_files("Kijai/WanVideo_comfy"))
-for f in wan_files:
-    print(f"  {f}")
+# (repo_id, exact_filename, dest_dir, canonical_symlink_name)
+WAN_REPO = "Kijai/WanVideo_comfy"
+PLAN = [
+    (WAN_REPO,
+     "Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors",      # NOTE: 480P uppercase, no _scaled_KJ
+     "/app/ComfyUI/models/diffusion_models/I2V",
+     "wan_i2v_480p.safetensors"),
+    (WAN_REPO,
+     "umt5-xxl-enc-fp8_e4m3fn.safetensors",
+     "/app/ComfyUI/models/text_encoders",
+     "wan_t5_encoder.safetensors"),
+    (WAN_REPO,
+     "Wan2_1_VAE_bf16.safetensors",
+     "/app/ComfyUI/models/vae",
+     "wan_vae.safetensors"),
+]
 
-# I2V 480p (fp8) — match any variant (_scaled_KJ, plain, etc.)
-i2v_candidates = sorted(
-    f for f in wan_files
-    if "I2V" in f and "480p" in f and f.endswith(".safetensors")
-)
-if not i2v_candidates:
-    raise RuntimeError(f"No I2V 480p model found. Files available: {wan_files}")
-i2v_file = i2v_candidates[0]
-print(f"\n[I2V] using: {i2v_file}")
+# Fail-loud existence check for the Kijai repo files.
+print(f"=== Verifying files exist in {WAN_REPO} ===")
+wan_files = set(api.list_repo_files(WAN_REPO))
+missing = [fname for repo, fname, _, _ in PLAN if repo == WAN_REPO and fname not in wan_files]
+if missing:
+    print("!!! MISSING files — upstream may have renamed them. Candidates:")
+    for f in sorted(x for x in wan_files if x.endswith(".safetensors")):
+        print("   ", f)
+    raise SystemExit(f"FATAL: these exact files are not in {WAN_REPO}: {missing}")
+print("All Kijai files present.")
 
-# UMT5 text encoder (fp8, any variant)
-t5_candidates = sorted(
-    f for f in wan_files
-    if "umt5" in f.lower() and f.endswith(".safetensors")
-)
-if not t5_candidates:
-    raise RuntimeError(f"No UMT5 encoder found. Files available: {wan_files}")
-t5_file = t5_candidates[0]
-t5_quant = "fp8_e4m3fnuz" if "fnuz" in t5_file else "fp8_e4m3fn"
-print(f"[T5 ] using: {t5_file}  (quantization={t5_quant})")
 
-# VAE
-vae_candidates = sorted(
-    f for f in wan_files
-    if "VAE" in f and f.endswith(".safetensors")
-)
-if not vae_candidates:
-    raise RuntimeError(f"No VAE found. Files available: {wan_files}")
-vae_file = vae_candidates[0]
-print(f"[VAE] using: {vae_file}")
-
-# ── 2. Download + canonical symlinks ────────────────────────────────────────
 def dl_and_link(repo, filename, dest_dir, canonical_name):
     os.makedirs(dest_dir, exist_ok=True)
+    print(f"Downloading {repo}/{filename} ...")
     hf_hub_download(repo_id=repo, filename=filename, local_dir=dest_dir)
-    actual   = os.path.join(dest_dir, filename)
-    symlink  = os.path.join(dest_dir, canonical_name)
-    if os.path.lexists(symlink):
-        os.remove(symlink)
-    os.symlink(actual, symlink)
+    actual = os.path.join(dest_dir, filename)
+    link = os.path.join(dest_dir, canonical_name)
+    if os.path.lexists(link):
+        os.remove(link)
+    os.symlink(actual, link)
     size_gb = os.path.getsize(actual) / 1e9
     print(f"  OK  {actual} ({size_gb:.1f} GB)")
-    print(f"  sym {symlink} -> {filename}")
+    print(f"  sym {link} -> {filename}")
 
-dl_and_link(
-    "Kijai/WanVideo_comfy", i2v_file,
-    "/app/ComfyUI/models/diffusion_models/I2V",
-    "wan_i2v_480p.safetensors",
-)
-dl_and_link(
-    "Kijai/WanVideo_comfy", t5_file,
-    "/app/ComfyUI/models/text_encoders",
-    "wan_t5_encoder.safetensors",
-)
-dl_and_link(
-    "Kijai/WanVideo_comfy", vae_file,
-    "/app/ComfyUI/models/vae",
-    "wan_vae.safetensors",
-)
 
-# ── 3. CLIP ViT-H-14 (h94/IP-Adapter, ViT-H/14 safetensors) ────────────────
-print("\n[CLIP] downloading from h94/IP-Adapter ...")
-CLIP_DIR = "/app/ComfyUI/models/clip_vision"
-os.makedirs(CLIP_DIR, exist_ok=True)
-clip_tmp = hf_hub_download(
+for repo, fname, dest, canon in PLAN:
+    dl_and_link(repo, fname, dest, canon)
+
+# CLIP ViT-H-14 visual encoder — from h94/IP-Adapter, copied (not symlinked,
+# because hf nests it under models/image_encoder/).
+print("\nDownloading CLIP ViT-H-14 from h94/IP-Adapter ...")
+clip_dir = "/app/ComfyUI/models/clip_vision"
+os.makedirs(clip_dir, exist_ok=True)
+clip_src = hf_hub_download(
     repo_id="h94/IP-Adapter",
     filename="models/image_encoder/model.safetensors",
     local_dir="/tmp/clip_dl",
 )
-clip_dest = os.path.join(CLIP_DIR, "wan_clip_h14.safetensors")
-shutil.copy2(clip_tmp, clip_dest)
-size_gb = os.path.getsize(clip_dest) / 1e9
-print(f"  OK  {clip_dest} ({size_gb:.1f} GB)")
+clip_dst = os.path.join(clip_dir, "wan_clip_h14.safetensors")
+shutil.copy2(clip_src, clip_dst)
+print(f"  OK  {clip_dst} ({os.path.getsize(clip_dst)/1e9:.1f} GB)")
 
-# ── 4. Write model config (read by submit_i2v_job.py for quantization) ──────
-import json
+# Config consumed by the workflow builder for the T5 quantization mode.
 config = {
-    "i2v_model":    f"I2V/{i2v_file}",
+    "i2v_model":    "I2V/Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors",
     "i2v_canonical": "I2V/wan_i2v_480p.safetensors",
-    "t5_model":     t5_file,
+    "i2v_quant":    "fp8_e4m3fn",
+    "t5_model":     "umt5-xxl-enc-fp8_e4m3fn.safetensors",
     "t5_canonical": "wan_t5_encoder.safetensors",
-    "t5_quant":     t5_quant,
-    "vae_model":    vae_file,
+    "t5_quant":     "fp8_e4m3fn",
     "vae_canonical": "wan_vae.safetensors",
-    "clip_model":   "wan_clip_h14.safetensors",
+    "clip_canonical": "wan_clip_h14.safetensors",
 }
-config_path = "/app/wanvideo_models.json"
-with open(config_path, "w") as fh:
+with open("/app/wanvideo_models.json", "w") as fh:
     json.dump(config, fh, indent=2)
-print(f"\nModel config: {config_path}")
+print("\nModel config /app/wanvideo_models.json:")
 print(json.dumps(config, indent=2))
-print("\n=== All models baked into image ===")
+print("\n=== All models baked correctly ===")
