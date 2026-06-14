@@ -3,6 +3,10 @@
 # nvidia/cuda base that required a manual python3.11 install + symlink, causing
 # `pip install` to target python3.10 while `python main.py` ran on python3.11
 # (different site-packages → torch not found → ComfyUI crash loop at startup).
+#
+# Build #10 regressed to bare `pip`/`python` (implicit) and the build failed at
+# the `huggingface_hub` install in 3m — same class of bug as #3/#5. Reverted to
+# the explicit `python3 -m pip` / `python3` pattern that worked in build #9.
 FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-devel
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -18,15 +22,15 @@ WORKDIR /app
 # ComfyUI
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git
 WORKDIR /app/ComfyUI
-RUN pip install -r requirements.txt
+RUN python3 -m pip install -r requirements.txt
 
 # Custom nodes
 WORKDIR /app/ComfyUI/custom_nodes
 RUN git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git && \
-    pip install -r ComfyUI-WanVideoWrapper/requirements.txt
+    python3 -m pip install -r ComfyUI-WanVideoWrapper/requirements.txt
 
 RUN git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && \
-    pip install -r ComfyUI-VideoHelperSuite/requirements.txt
+    python3 -m pip install -r ComfyUI-VideoHelperSuite/requirements.txt
 
 # Model directories
 RUN mkdir -p /app/ComfyUI/models/diffusion_models/I2V \
@@ -40,7 +44,7 @@ RUN mkdir -p /app/ComfyUI/models/diffusion_models/I2V \
 # Script in a separate file to avoid Docker mis-parsing "from X import Y" as FROM.
 # Public HF repos (no HF_TOKEN needed). Total ~25GB, build time ~25-35 min.
 COPY docker/download_models.py /tmp/download_models.py
-RUN pip install --no-cache-dir huggingface_hub && python /tmp/download_models.py
+RUN python3 -m pip install --no-cache-dir huggingface_hub && python3 /tmp/download_models.py
 
 WORKDIR /app/ComfyUI
 
