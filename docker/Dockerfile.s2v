@@ -32,8 +32,9 @@ RUN python3 -m pip install --no-cache-dir huggingface_hub && python3 /tmp/downlo
 # ComfyUI port
 EXPOSE 8188
 
-# Reuse the I2V entrypoint (it just runs `python main.py --port 8188`)
-COPY --from=base /entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
+# /entrypoint.sh is already present + executable from the base image
+# (comfyui-wan2 bakes it at /entrypoint.sh, chmod +x). The previous
+# `COPY --from=base /entrypoint.sh` ran INSIDE the stage named `base`,
+# copying from itself → "circular dependency detected on stage: base".
+# FROM already inherits the file, so no COPY is needed.
 ENTRYPOINT ["/entrypoint.sh"]
