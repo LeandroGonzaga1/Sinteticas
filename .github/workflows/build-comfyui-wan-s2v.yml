@@ -59,8 +59,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # S2V layers are baked at build time via docker/download_models_s2v.py.
-          # Repos are public on HF — no HF_TOKEN required.
+          # Wan-AI/Wan2.2-S2V-14B (wav2vec source) may be HF-gated. The other
+          # 3 files come from Kijai public repos (no token required). Pass
+          # HF_TOKEN as a build ENV so huggingface_hub picks it up from
+          # os.environ during download_models_s2v.py. If the repo is actually
+          # public, the token is simply ignored.
+          env:
+            HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       # NOTE: package visibility (public) is set once in the GitHub UI and
       # persists across pushes. We do NOT PATCH it per-build.

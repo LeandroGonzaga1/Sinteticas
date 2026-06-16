@@ -1,40 +1,63 @@
-# Wan2.2-S2V image — published as a SEPARATE GHCR image (comfyui-wan-s2v)
-# to avoid clobbering the working I2V image (comfyui-wan2:latest).
+# Wan2.2-S2V image — SEPARATE GHCR image (comfyui-wan-s2v).
 #
-# This Dockerfile bakes Wan2.2-S2V (single fp8 file) + Wav2Vec2 XLSR-53 audio
-# encoder on top of the Wan2.1 I2V base (ComfyUI + Kijai WanVideoWrapper + VHS).
+# Built from the SAME small pytorch base as the I2V image
+# (Dockerfile.spheron-wan), NOT layered on top of the 30GB I2V image.
 #
-# The build is split into two layers:
-#   1. Base I2V layer (ghcr.io/leandrogonzaga1/comfyui-wan2:latest) — ComfyUI
-#      + Wan2.1 I2V models. Cached, shared with the working I2V image.
-#   2. S2V layer (this file) — adds S2V fp8 + Wav2Vec2.
-# So S2V builds only pay the diff cost (~17GB + 25-35min).
-#
-# Final image is published as `comfyui-wan-s2v:latest` (separate from I2V).
+# Why not `FROM comfyui-wan2:latest`: pulling the ~30GB I2V image into the
+# GitHub-hosted runner's buildkit cache exhausts disk ("no space left on
+# device") at the compute-cache-key stage, before the build even starts
+# (build run #1/#2 failed exactly there). Mirroring the proven I2V recipe
+# (small base + bake ONLY the S2V models) fits the runner — the I2V image
+# built successfully this way (~30GB). Models stay baked → fast pod cold start
+# (no 17GB runtime download).
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-devel
 
-# syntax=docker/dockerfile:1.6
-FROM ghcr.io/leandrogonzaga1/comfyui-wan2:latest AS base
-
+ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Extra model dirs needed for S2V (audio_encoders + S2V subdir)
-RUN mkdir -p /app/ComfyUI/models/diffusion_models/WanVideo/S2V \
-             /app/ComfyUI/models/vae/wanvideo \
-             /app/ComfyUI/models/audio_encoders
+RUN apt-get update && apt-get install -y \
+    git wget curl ffmpeg \
+    libgl1-mesa-glx libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Bake Wan2.2-S2V (single fp8 file from Kijai) + Wav2Vec2 XLSR-53 audio encoder.
-# Same fail-loud pattern as download_models.py: assert files exist in upstream
-# repos before downloading. If a filename was renamed upstream, the build aborts.
-# Adds ~17GB to the image; build time +20-30min over the cached base.
+WORKDIR /app
+
+# ComfyUI
+RUN git clone https://github.com/comfyanonymous/ComfyUI.git
+WORKDIR /app/ComfyUI
+RUN python3 -m pip install -r requirements.txt
+
+# Custom nodes — WanVideoWrapper provides the S2V submodule
+# (WanVideoModelLoader, WanVideoSampler, WanVideoAddS2VEmbeds); VHS provides
+# VHS_LoadAudio / VHS_VideoCombine. AudioEncoderLoader / AudioEncoderEncode are
+# ComfyUI core audio nodes (present in the fresh ComfyUI clone).
+WORKDIR /app/ComfyUI/custom_nodes
+RUN git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git && \
+    python3 -m pip install -r ComfyUI-WanVideoWrapper/requirements.txt
+
+RUN git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && \
+    python3 -m pip install -r ComfyUI-VideoHelperSuite/requirements.txt
+
+# Model directories (download_models_s2v.py also creates these; harmless overlap)
+RUN mkdir -p /app/ComfyUI/models/diffusion_models/WanVideo/S2V \
+             /app/ComfyUI/models/text_encoders \
+             /app/ComfyUI/models/vae/wanvideo \
+             /app/ComfyUI/models/audio_encoders \
+             /app/ComfyUI/input \
+             /app/ComfyUI/output
+
+# Bake Wan2.2-S2V models at build time (fp8 single file + umt5 T5 + Wan2.1 VAE
+# + wav2vec XLSR-53). Fail-loud: asserts each filename exists upstream before
+# download. NOTE: if Wan-AI/Wan2.2-S2V-14B (wav2vec source) is HF-gated, the
+# build needs HF_TOKEN as an Actions secret passed into this step.
 COPY docker/download_models_s2v.py /tmp/download_models_s2v.py
 RUN python3 -m pip install --no-cache-dir huggingface_hub && python3 /tmp/download_models_s2v.py
 
-# ComfyUI port
+WORKDIR /app/ComfyUI
+
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 EXPOSE 8188
 
-# /entrypoint.sh is already present + executable from the base image
-# (comfyui-wan2 bakes it at /entrypoint.sh, chmod +x). The previous
-# `COPY --from=base /entrypoint.sh` ran INSIDE the stage named `base`,
-# copying from itself → "circular dependency detected on stage: base".
-# FROM already inherits the file, so no COPY is needed.
 ENTRYPOINT ["/entrypoint.sh"]
