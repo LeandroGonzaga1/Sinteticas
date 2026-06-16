@@ -48,8 +48,11 @@ RUN mkdir -p /app/ComfyUI/models/diffusion_models/WanVideo/S2V \
 
 # Bake Wan2.2-S2V models at build time (fp8 single file + umt5 T5 + Wan2.1 VAE
 # + wav2vec XLSR-53). Fail-loud: asserts each filename exists upstream before
-# download. NOTE: if Wan-AI/Wan2.2-S2V-14B (wav2vec source) is HF-gated, the
-# build needs HF_TOKEN as an Actions secret passed into this step.
+# download. HF_TOKEN is passed via build-arg (see workflow); ARG + ENV export
+# so huggingface_hub picks it up from os.environ during the download. The
+# other 3 files come from Kijai public repos (no token required).
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 COPY docker/download_models_s2v.py /tmp/download_models_s2v.py
 RUN python3 -m pip install --no-cache-dir huggingface_hub && python3 /tmp/download_models_s2v.py
 

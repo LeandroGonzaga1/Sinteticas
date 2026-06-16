@@ -61,11 +61,18 @@ jobs:
           cache-to: type=gha,mode=max
           # Wan-AI/Wan2.2-S2V-14B (wav2vec source) may be HF-gated. The other
           # 3 files come from Kijai public repos (no token required). Pass
-          # HF_TOKEN as a build ENV so huggingface_hub picks it up from
-          # os.environ during download_models_s2v.py. If the repo is actually
-          # public, the token is simply ignored.
-          env:
-            HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # HF_TOKEN as a Docker build-arg (matches the ARG HF_TOKEN /
+          # ENV HF_TOKEN=${HF_TOKEN} pair in Dockerfile.s2v so
+          # huggingface_hub picks it up from os.environ during
+          # download_models_s2v.py). If the repo is actually public, the
+          # token is simply ignored.
+          #
+          # NOTE: `env:` at this scope is NOT a valid input of
+          # docker/build-push-action@v5 — placing it inside `with:` causes a
+          # YAML parse error ("A mapping was not expected" at line 68) and
+          # aborts the run before any step executes. Use `build-args:` for
+          # build-time secrets.
+          build-args: HF_TOKEN=${{ secrets.HF_TOKEN }}
 
       # NOTE: package visibility (public) is set once in the GitHub UI and
       # persists across pushes. We do NOT PATCH it per-build.
