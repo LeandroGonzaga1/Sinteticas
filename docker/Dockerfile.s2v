@@ -1,0 +1,39 @@
+# Wan2.2-S2V image — published as a SEPARATE GHCR image (comfyui-wan-s2v)
+# to avoid clobbering the working I2V image (comfyui-wan2:latest).
+#
+# This Dockerfile bakes Wan2.2-S2V (single fp8 file) + Wav2Vec2 XLSR-53 audio
+# encoder on top of the Wan2.1 I2V base (ComfyUI + Kijai WanVideoWrapper + VHS).
+#
+# The build is split into two layers:
+#   1. Base I2V layer (ghcr.io/leandrogonzaga1/comfyui-wan2:latest) — ComfyUI
+#      + Wan2.1 I2V models. Cached, shared with the working I2V image.
+#   2. S2V layer (this file) — adds S2V fp8 + Wav2Vec2.
+# So S2V builds only pay the diff cost (~17GB + 25-35min).
+#
+# Final image is published as `comfyui-wan-s2v:latest` (separate from I2V).
+
+# syntax=docker/dockerfile:1.6
+FROM ghcr.io/leandrogonzaga1/comfyui-wan2:latest AS base
+
+ENV PYTHONUNBUFFERED=1
+
+# Extra model dirs needed for S2V (audio_encoders + S2V subdir)
+RUN mkdir -p /app/ComfyUI/models/diffusion_models/WanVideo/S2V \
+             /app/ComfyUI/models/vae/wanvideo \
+             /app/ComfyUI/models/audio_encoders
+
+# Bake Wan2.2-S2V (single fp8 file from Kijai) + Wav2Vec2 XLSR-53 audio encoder.
+# Same fail-loud pattern as download_models.py: assert files exist in upstream
+# repos before downloading. If a filename was renamed upstream, the build aborts.
+# Adds ~17GB to the image; build time +20-30min over the cached base.
+COPY docker/download_models_s2v.py /tmp/download_models_s2v.py
+RUN python3 -m pip install --no-cache-dir huggingface_hub && python3 /tmp/download_models_s2v.py
+
+# ComfyUI port
+EXPOSE 8188
+
+# Reuse the I2V entrypoint (it just runs `python main.py --port 8188`)
+COPY --from=base /entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
