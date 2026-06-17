@@ -123,7 +123,7 @@ def dl_and_link(repo, filename, dest_dir, canonical_name, file_role):
     if os.path.lexists(link):
         os.remove(link)
     if os.path.abspath(actual) != os.path.abspath(link):
-        os.symlink(actual, link)
+        shutil.copy2(actual, link)
     return actual, size_gb
 
 
