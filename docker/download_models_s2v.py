@@ -41,29 +41,27 @@ from huggingface_hub import HfApi, hf_hub_download
 
 api = HfApi()
 
-# (repo_id, exact_filename, dest_dir, canonical_symlink_name, file_role,
-#  min_size_gb)
+# (repo_id, exact_filename, dest_dir, canonical_symlink_name, file_role)
 #
-# ORDER MATTERS: smallest files first. The GitHub-hosted runner has limited
-# disk even after free-disk-space (~25-30GB usable once the build's own
-# layers — torch base, ComfyUI clone, custom node deps — are accounted for).
-# Build #27670524148 baked the ~16GB S2V model + ~10GB T5 successfully but
-# silently produced empty/missing VAE (~0.6GB) and T5 dropdowns at runtime —
-# consistent with disk exhaustion partway through the 4-file sequence (the
-# 2 largest files first leave the least headroom for the smaller ones after
-# them). Downloading small-to-large fails fast on the cheap files instead of
-# burning 25+ min before discovering the run was always going to run out of
-# space.
+# No hardcoded min_size_gb guesses — build #28250424800 failed in 3min16s
+# because the guessed VAE threshold (0.3GB) was HIGHER than the real file
+# (0.254GB), a false-positive FATAL on the very first (smallest) download.
+# Real sizes are now fetched from the HF API at pre-flight time (see
+# _assert_files_exist_and_get_sizes) and used directly as the size-check
+# floor (95% of real size — tolerant of metadata rounding, still catches
+# truncation).
+#
+# ORDER MATTERS: smallest files first — fails fast on cheap files instead of
+# burning 25+ min before discovering a real problem (disk, auth, network).
 S2V_PLAN = [
-    # ---- VAE (Kijai WanVideo_comfy, Wan2.1 VAE works for Wan2.2, ~0.6GB) ----
+    # ---- VAE (Kijai WanVideo_comfy, Wan2.1 VAE works for Wan2.2, ~0.25GB) ----
     ("Kijai/WanVideo_comfy",
      "Wan2_1_VAE_bf16.safetensors",
      "/app/ComfyUI/models/vae/wanvideo",
      "Wan2_1_VAE_bf16.safetensors",
-     "vae",
-     0.3),
+     "vae"),
 
-    # ---- Audio encoder (Wav2Vec2 XLSR-53 english, ~1.3GB) ----
+    # ---- Audio encoder (Wav2Vec2 XLSR-53 english, ~1.26GB) ----
     # Original HF key prefix is `wav2vec2.*` — already matches what Kijai's
     # AudioEncoderLoader expects (see comfy/audio_encoders/audio_encoders.py:50).
     # Kijai's "wav2vec_xlsr_53_english_fp32.safetensors" is the same file
@@ -72,40 +70,45 @@ S2V_PLAN = [
      "wav2vec2-large-xlsr-53-english/model.safetensors",
      "/app/ComfyUI/models/audio_encoders",
      "wav2vec_xlsr_53_english_fp32.safetensors",
-     "wav2vec",
-     0.8),
+     "wav2vec"),
 
-    # ---- T5 text encoder (Kijai WanVideo_comfy, BF16, ~10GB) ----
+    # ---- T5 text encoder (Kijai WanVideo_comfy, BF16, ~11.4GB) ----
     ("Kijai/WanVideo_comfy",
      "umt5-xxl-enc-bf16.safetensors",
      "/app/ComfyUI/models/text_encoders",
      "umt5-xxl-enc-bf16.safetensors",
-     "t5",
-     6.0),
+     "t5"),
 
-    # ---- The S2V model (Kijai fp8-scaled, single file, ~16GB) ----
+    # ---- The S2V model (Kijai fp8-scaled, single file, ~16.7GB) ----
     ("Kijai/WanVideo_comfy_fp8_scaled",
      "S2V/Wan2_2-S2V-14B_fp8_e4m3fn_scaled_KJ.safetensors",
      "/app/ComfyUI/models/diffusion_models/WanVideo/S2V",
      "Wan2_2-S2V-14B_fp8_e4m3fn_scaled_KJ.safetensors",
-     "s2v_model",
-     10.0),
+     "s2v_model"),
 ]
 
 
-def _assert_files_exist(plan):
-    """Group files by repo and assert each filename exists upstream.
-    Prints available candidates if any are missing. Raises SystemExit on fail.
+def _assert_files_exist_and_get_sizes(plan):
+    """Group files by repo, assert each filename exists upstream, and return
+    {(repo, filename): size_bytes} from HF's own metadata.
+
+    Real sizes replace hardcoded min_size_gb guesses — build #28250424800
+    failed in 3min16s because a guessed VAE threshold (0.3GB) was HIGHER
+    than the real file (0.254GB): a false-positive FATAL on the very first
+    (smallest) download. Asking HF for the real size up front removes the
+    entire class of "guessed the wrong constant" bug.
     """
     by_repo: dict[str, list[str]] = {}
     for repo, fname, *_ in plan:
         by_repo.setdefault(repo, []).append(fname)
+    sizes: dict[tuple[str, str], int] = {}
     for repo, wanted in by_repo.items():
         print(f"=== Verifying {len(wanted)} file(s) in {repo} ===")
         try:
-            upstream = set(api.list_repo_files(repo))
+            info = api.repo_info(repo, files_metadata=True)
         except Exception as e:
-            raise SystemExit(f"FATAL: cannot list {repo}: {e}")
+            raise SystemExit(f"FATAL: cannot inspect {repo}: {e}")
+        upstream = {f.rfilename: f.size for f in info.siblings}
         missing = [f for f in wanted if f not in upstream]
         if missing:
             print(f"!!! MISSING files in {repo}:")
@@ -115,13 +118,16 @@ def _assert_files_exist(plan):
             for f in sorted(x for x in upstream
                             if "audio" in x.lower()
                             or x.endswith(".safetensors")):
-                print(f"   {f}")
+                print(f"   {x}")
             raise SystemExit(f"FATAL: missing files in {repo}: {missing}")
-        print(f"   all {len(wanted)} file(s) present.")
+        for f in wanted:
+            sizes[(repo, f)] = upstream[f]
+            print(f"   {f}: {upstream[f]/1e9:.3f} GB (real size, from HF metadata)")
+    return sizes
 
 
 print("=== Pre-flight: asserting all filenames exist upstream ===")
-_assert_files_exist(S2V_PLAN)
+REAL_SIZES = _assert_files_exist_and_get_sizes(S2V_PLAN)
 print()
 
 
@@ -130,21 +136,24 @@ def _free_gb(path="/"):
     return usage.free / 1e9
 
 
-def dl_and_link(repo, filename, dest_dir, canonical_name, file_role, min_size_gb):
+def dl_and_link(repo, filename, dest_dir, canonical_name, file_role, real_size_bytes):
     """Download a single file and create a canonical symlink in dest_dir.
 
     FAIL LOUD on two distinct failure modes that previously passed silently:
       1. hf_hub_download raises -> already propagates (no change needed).
       2. hf_hub_download (or the disk under it) truncates/short-writes the
          file without raising -> `os.path.exists()` alone does NOT catch
-         this (a 0-byte or partial file still "exists"). We now also assert
-         a minimum size per file, derived from the known model size, so a
-         disk-full mid-download or interrupted transfer aborts the build
-         instead of baking a corrupt/empty model.
+         this (a 0-byte or partial file still "exists"). We assert the
+         downloaded size against 95% of the REAL size from HF metadata
+         (REAL_SIZES, fetched in _assert_files_exist_and_get_sizes) — not a
+         hand-guessed constant — so a disk-full mid-download or interrupted
+         transfer aborts the build instead of baking a corrupt/empty model.
     """
+    min_size_bytes = real_size_bytes * 0.95
     os.makedirs(dest_dir, exist_ok=True)
     free_before = _free_gb()
-    print(f"[{file_role}] {repo}/{filename}  (disk free: {free_before:.1f} GB)")
+    print(f"[{file_role}] {repo}/{filename}  (disk free: {free_before:.1f} GB, "
+          f"expecting {real_size_bytes/1e9:.3f} GB)")
     hf_hub_download(repo_id=repo, filename=filename, local_dir=dest_dir)
     actual = os.path.join(dest_dir, filename)
     if not os.path.exists(actual):
@@ -152,21 +161,23 @@ def dl_and_link(repo, filename, dest_dir, canonical_name, file_role, min_size_gb
             f"FATAL [{file_role}]: downloaded file not found: {actual} "
             f"(disk free was {free_before:.1f} GB before this download)"
         )
-    size_gb = os.path.getsize(actual) / 1e9
-    if size_gb < min_size_gb:
+    size_bytes = os.path.getsize(actual)
+    size_gb = size_bytes / 1e9
+    if size_bytes < min_size_bytes:
         raise SystemExit(
             f"FATAL [{file_role}]: {actual} is {size_gb:.3f} GB, expected "
-            f">= {min_size_gb} GB. File is truncated/empty — likely disk "
-            f"exhaustion mid-download (disk free was {free_before:.1f} GB "
-            f"before this download started, now {_free_gb():.1f} GB)."
+            f"~{real_size_bytes/1e9:.3f} GB (>= 95%). File is truncated/empty "
+            f"— likely disk exhaustion mid-download (disk free was "
+            f"{free_before:.1f} GB before this download started, now "
+            f"{_free_gb():.1f} GB)."
         )
-    print(f"   {size_gb:.2f} GB  (disk free now: {_free_gb():.1f} GB)")
+    print(f"   {size_gb:.3f} GB  (disk free now: {_free_gb():.1f} GB)")
     link = os.path.join(dest_dir, canonical_name)
     if os.path.lexists(link):
         os.remove(link)
     if os.path.abspath(actual) != os.path.abspath(link):
         shutil.copy2(actual, link)
-        if not os.path.exists(link) or os.path.getsize(link) < min_size_gb * 1e9:
+        if not os.path.exists(link) or os.path.getsize(link) < min_size_bytes:
             raise SystemExit(
                 f"FATAL [{file_role}]: copy2 to canonical name {link} "
                 f"failed or produced a truncated file (disk free: "
@@ -178,8 +189,8 @@ def dl_and_link(repo, filename, dest_dir, canonical_name, file_role, min_size_gb
 print("=== Downloading S2V models + T5 + VAE + Wav2Vec ===")
 print(f"Disk free at start: {_free_gb():.1f} GB")
 total_gb = 0.0
-for repo, fname, dest, canon, role, min_gb in S2V_PLAN:
-    _, gb = dl_and_link(repo, fname, dest, canon, role, min_gb)
+for repo, fname, dest, canon, role in S2V_PLAN:
+    _, gb = dl_and_link(repo, fname, dest, canon, role, REAL_SIZES[(repo, fname)])
     total_gb += gb
 print(f"\n=== Total downloaded: {total_gb:.1f} GB  (disk free now: {_free_gb():.1f} GB) ===\n")
 
