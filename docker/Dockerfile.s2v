@@ -54,7 +54,19 @@ RUN mkdir -p /app/ComfyUI/models/diffusion_models/WanVideo/S2V \
 ARG HF_TOKEN
 ENV HF_TOKEN=${HF_TOKEN}
 COPY docker/download_models_s2v.py /tmp/download_models_s2v.py
-RUN python3 -m pip install --no-cache-dir huggingface_hub && python3 /tmp/download_models_s2v.py
+RUN df -h / && python3 -m pip install --no-cache-dir huggingface_hub && python3 /tmp/download_models_s2v.py
+
+# Fail-loud verification: the build must not succeed with a missing or
+# truncated VAE/T5/model/wav2vec file. Build #27670524148 passed (exit 0)
+# with empty VAE + T5 ComfyUI dropdowns at runtime — root cause was a
+# silent short-write (suspected disk exhaustion on the GitHub-hosted
+# runner), which `os.path.exists()` alone does not catch. These checks are
+# a second, independent guard at the Docker layer in case the Python-side
+# size assertion (download_models_s2v.py) is ever bypassed or weakened.
+RUN test -s /app/ComfyUI/models/vae/wanvideo/Wan2_1_VAE_bf16.safetensors && echo "VAE OK: $(ls -la /app/ComfyUI/models/vae/wanvideo/)" || (echo "FATAL: VAE MISSING/EMPTY" && df -h / && find /app/ComfyUI/models/vae -type f -exec ls -la {} \; && exit 1)
+RUN test -s /app/ComfyUI/models/text_encoders/umt5-xxl-enc-bf16.safetensors && echo "T5 OK: $(ls -la /app/ComfyUI/models/text_encoders/)" || (echo "FATAL: T5 MISSING/EMPTY" && df -h / && find /app/ComfyUI/models/text_encoders -type f -exec ls -la {} \; && exit 1)
+RUN test -s /app/ComfyUI/models/diffusion_models/WanVideo/S2V/Wan2_2-S2V-14B_fp8_e4m3fn_scaled_KJ.safetensors && echo "S2V MODEL OK" || (echo "FATAL: S2V MODEL MISSING/EMPTY" && df -h / && find /app/ComfyUI/models/diffusion_models -type f -exec ls -la {} \; && exit 1)
+RUN test -s /app/ComfyUI/models/audio_encoders/wav2vec_xlsr_53_english_fp32.safetensors && echo "WAV2VEC OK" || (echo "FATAL: WAV2VEC MISSING/EMPTY" && df -h / && find /app/ComfyUI/models/audio_encoders -type f -exec ls -la {} \; && exit 1)
 
 WORKDIR /app/ComfyUI
 
