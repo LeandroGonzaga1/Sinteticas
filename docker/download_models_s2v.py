@@ -137,53 +137,57 @@ def _free_gb(path="/"):
 
 
 def dl_and_link(repo, filename, dest_dir, canonical_name, file_role, real_size_bytes):
-    """Download a single file and create a canonical symlink in dest_dir.
+    """Download a single file into the default HF cache, then COPY (not
+    hardlink) its bytes into dest_dir/canonical_name.
 
-    FAIL LOUD on two distinct failure modes that previously passed silently:
-      1. hf_hub_download raises -> already propagates (no change needed).
-      2. hf_hub_download (or the disk under it) truncates/short-writes the
-         file without raising -> `os.path.exists()` alone does NOT catch
-         this (a 0-byte or partial file still "exists"). We assert the
-         downloaded size against 95% of the REAL size from HF metadata
-         (REAL_SIZES, fetched in _assert_files_exist_and_get_sizes) — not a
-         hand-guessed constant — so a disk-full mid-download or interrupted
-         transfer aborts the build instead of baking a corrupt/empty model.
+    Build #7 (commit ad83b0d) proved hf_hub_download(..., local_dir=dest_dir)
+    is not safe inside a Docker RUN layer: the Python-side size check passed
+    (file existed, correct size, all within the SAME RUN/layer) — yet the
+    very next RUN layer's `test -s` guard saw it as missing/empty. That's
+    the signature of a hardlink that doesn't survive BuildKit's layer-diff:
+    hf_hub_download's local_dir mode hardlinks from its internal blob cache
+    instead of writing an independent file, and overlayfs layer commits can
+    drop that link when promoting only the destination path into the new
+    layer (the source blob lives in ~/.cache/huggingface, untouched, so the
+    hardlink's other half isn't preserved in this layer's diff).
+
+    Fix: download with NO local_dir (plain HF cache), then explicit
+    shutil.copy2() the cache blob into dest_dir — a real, independent file
+    write that's guaranteed to be promoted into the layer correctly.
     """
     min_size_bytes = real_size_bytes * 0.95
     os.makedirs(dest_dir, exist_ok=True)
     free_before = _free_gb()
     print(f"[{file_role}] {repo}/{filename}  (disk free: {free_before:.1f} GB, "
           f"expecting {real_size_bytes/1e9:.3f} GB)")
-    hf_hub_download(repo_id=repo, filename=filename, local_dir=dest_dir)
-    actual = os.path.join(dest_dir, filename)
-    if not os.path.exists(actual):
+    cache_path = hf_hub_download(repo_id=repo, filename=filename)
+    link = os.path.join(dest_dir, canonical_name)
+    if os.path.lexists(link):
+        os.remove(link)
+    shutil.copy2(cache_path, link)
+    if not os.path.exists(link):
         raise SystemExit(
-            f"FATAL [{file_role}]: downloaded file not found: {actual} "
+            f"FATAL [{file_role}]: copy to {link} did not produce a file "
             f"(disk free was {free_before:.1f} GB before this download)"
         )
-    size_bytes = os.path.getsize(actual)
+    size_bytes = os.path.getsize(link)
     size_gb = size_bytes / 1e9
     if size_bytes < min_size_bytes:
         raise SystemExit(
-            f"FATAL [{file_role}]: {actual} is {size_gb:.3f} GB, expected "
+            f"FATAL [{file_role}]: {link} is {size_gb:.3f} GB, expected "
             f"~{real_size_bytes/1e9:.3f} GB (>= 95%). File is truncated/empty "
             f"— likely disk exhaustion mid-download (disk free was "
             f"{free_before:.1f} GB before this download started, now "
             f"{_free_gb():.1f} GB)."
         )
-    print(f"   {size_gb:.3f} GB  (disk free now: {_free_gb():.1f} GB)")
-    link = os.path.join(dest_dir, canonical_name)
-    if os.path.lexists(link):
-        os.remove(link)
-    if os.path.abspath(actual) != os.path.abspath(link):
-        shutil.copy2(actual, link)
-        if not os.path.exists(link) or os.path.getsize(link) < min_size_bytes:
-            raise SystemExit(
-                f"FATAL [{file_role}]: copy2 to canonical name {link} "
-                f"failed or produced a truncated file (disk free: "
-                f"{_free_gb():.1f} GB)."
-            )
-    return actual, size_gb
+    # Drop the HF cache blob immediately — it's now duplicated at `link`.
+    # Without this, the default-cache download (no local_dir) DOUBLES disk
+    # usage per file (cache blob + copy) at the exact moment we're trying to
+    # avoid disk pressure. Safe because we never re-download the same file
+    # twice in this script.
+    shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
+    print(f"   {size_gb:.3f} GB  (disk free now: {_free_gb():.1f} GB, cache cleared)")
+    return link, size_gb
 
 
 print("=== Downloading S2V models + T5 + VAE + Wav2Vec ===")
