@@ -137,23 +137,26 @@ def _free_gb(path="/"):
 
 
 def dl_and_link(repo, filename, dest_dir, canonical_name, file_role, real_size_bytes):
-    """Download a single file into the default HF cache, then COPY (not
-    hardlink) its bytes into dest_dir/canonical_name.
+    """Download a single file into the default HF cache, then MOVE (rename,
+    not copy) its bytes into dest_dir/canonical_name.
 
-    Build #7 (commit ad83b0d) proved hf_hub_download(..., local_dir=dest_dir)
-    is not safe inside a Docker RUN layer: the Python-side size check passed
-    (file existed, correct size, all within the SAME RUN/layer) — yet the
-    very next RUN layer's `test -s` guard saw it as missing/empty. That's
-    the signature of a hardlink that doesn't survive BuildKit's layer-diff:
-    hf_hub_download's local_dir mode hardlinks from its internal blob cache
-    instead of writing an independent file, and overlayfs layer commits can
-    drop that link when promoting only the destination path into the new
-    layer (the source blob lives in ~/.cache/huggingface, untouched, so the
-    hardlink's other half isn't preserved in this layer's diff).
+    Build #7 (ad83b0d) proved hf_hub_download(..., local_dir=dest_dir) is
+    not safe inside a Docker RUN layer: the file existed with the right size
+    in the SAME RUN/layer, yet the NEXT layer's `test -s` guard saw it as
+    missing/empty — the signature of a hardlink (two paths, one inode) that
+    BuildKit's layer-diff didn't fully promote.
 
-    Fix: download with NO local_dir (plain HF cache), then explicit
-    shutil.copy2() the cache blob into dest_dir — a real, independent file
-    write that's guaranteed to be promoted into the layer correctly.
+    Build #8 (a396251) fixed that with shutil.copy2() from a no-local_dir
+    cache download, but copy2 needs BOTH the cache blob and the destination
+    copy on disk simultaneously — for the largest file (16.7GB S2V model)
+    that's a ~33GB peak just for one file, on top of whatever's already
+    baked, and disk ran out (1h25min run, far past where build #7 died in
+    3min, then failed).
+
+    Fix: shutil.move() instead of copy2(). A same-filesystem move is a
+    rename(2) — O(1), zero extra bytes on disk — and unlike the original
+    hardlink bug, it leaves exactly ONE path pointing at the inode (no
+    second live reference in the cache dir for BuildKit's diff to lose).
     """
     min_size_bytes = real_size_bytes * 0.95
     os.makedirs(dest_dir, exist_ok=True)
@@ -164,10 +167,10 @@ def dl_and_link(repo, filename, dest_dir, canonical_name, file_role, real_size_b
     link = os.path.join(dest_dir, canonical_name)
     if os.path.lexists(link):
         os.remove(link)
-    shutil.copy2(cache_path, link)
+    shutil.move(cache_path, link)
     if not os.path.exists(link):
         raise SystemExit(
-            f"FATAL [{file_role}]: copy to {link} did not produce a file "
+            f"FATAL [{file_role}]: move to {link} did not produce a file "
             f"(disk free was {free_before:.1f} GB before this download)"
         )
     size_bytes = os.path.getsize(link)
@@ -180,13 +183,11 @@ def dl_and_link(repo, filename, dest_dir, canonical_name, file_role, real_size_b
             f"{free_before:.1f} GB before this download started, now "
             f"{_free_gb():.1f} GB)."
         )
-    # Drop the HF cache blob immediately — it's now duplicated at `link`.
-    # Without this, the default-cache download (no local_dir) DOUBLES disk
-    # usage per file (cache blob + copy) at the exact moment we're trying to
-    # avoid disk pressure. Safe because we never re-download the same file
-    # twice in this script.
+    # Clear leftover HF cache scaffolding (snapshot dirs, now-dangling
+    # symlinks pointing at the moved blob) — harmless but tidy, and tiny
+    # compared to the model files themselves.
     shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
-    print(f"   {size_gb:.3f} GB  (disk free now: {_free_gb():.1f} GB, cache cleared)")
+    print(f"   {size_gb:.3f} GB  (disk free now: {_free_gb():.1f} GB)")
     return link, size_gb
 
 
