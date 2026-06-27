@@ -153,17 +153,26 @@ def dl_and_link(repo, filename, dest_dir, canonical_name, file_role, real_size_b
     baked, and disk ran out (1h25min run, far past where build #7 died in
     3min, then failed).
 
-    Fix: shutil.move() instead of copy2(). A same-filesystem move is a
-    rename(2) — O(1), zero extra bytes on disk — and unlike the original
-    hardlink bug, it leaves exactly ONE path pointing at the inode (no
-    second live reference in the cache dir for BuildKit's diff to lose).
+    Fix v1 (build #9, c21daa0): shutil.move() instead of copy2(). FAILED in
+    4.5min — on Linux, hf_hub_download's cache path is a SYMLINK with a
+    RELATIVE target (e.g. snapshots/<rev>/file -> ../../blobs/<hash>).
+    shutil.move's first attempt is os.rename(src, dst), which on a symlink
+    renames the LINK ITSELF (doesn't follow it) — moving that relative
+    symlink into a different directory makes its relative target resolve
+    to the wrong place from the new location, producing a broken symlink.
+    os.path.exists() on a broken symlink is False, which our own check
+    correctly caught as FATAL (fast failure, no exception needed).
+
+    Fix v2: os.path.realpath() the cache path FIRST, so we move the actual
+    blob file (no symlink involved at all) instead of a relative symlink
+    that breaks when relocated.
     """
     min_size_bytes = real_size_bytes * 0.95
     os.makedirs(dest_dir, exist_ok=True)
     free_before = _free_gb()
     print(f"[{file_role}] {repo}/{filename}  (disk free: {free_before:.1f} GB, "
           f"expecting {real_size_bytes/1e9:.3f} GB)")
-    cache_path = hf_hub_download(repo_id=repo, filename=filename)
+    cache_path = os.path.realpath(hf_hub_download(repo_id=repo, filename=filename))
     link = os.path.join(dest_dir, canonical_name)
     if os.path.lexists(link):
         os.remove(link)
